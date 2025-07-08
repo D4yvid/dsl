@@ -1,3 +1,13 @@
+/**
+ * @file builder.unix.h
+ * @brief The Unix-specific backend implementation for the builder framework.
+ *
+ * This file provides the concrete definitions for functions, types, and macros
+ * required by `builder.h` for Unix-like operating systems (e.g., Linux, macOS).
+ * It implements process creation, command execution, file system checks, and
+ * logging using POSIX and standard C library APIs. This file is not meant to be
+ * included directly, but rather through the main `builder.h` header.
+ */
 #ifndef __BUILDER_UNIX_H__
 #define __BUILDER_UNIX_H__
 
@@ -17,104 +27,166 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define error(msg, ...)                                                                       \
-  if (build_context)                                                                          \
+/**
+ * @brief Prints a formatted error message to stderr, prefixed with the current build context name if available.
+ * @param msg The format string for the message.
+ * @param ... The variable arguments for the format string.
+ */
+#define error(msg, ...)                                                                        \
+  if (build_context)                                                                           \
     fprintf(stderr, "\033[31merr:\033[m %s: " msg "\n", build_context->name, ##__VA_ARGS__);  \
-  else                                                                                        \
+  else                                                                                         \
     fprintf(stderr, "\033[31merr:\033[m " msg "\n", ##__VA_ARGS__)
 
-#define warn(msg, ...)                                                                        \
-  if (build_context)                                                                          \
+/**
+ * @brief Prints a formatted warning message to stderr, prefixed with the current build context name if available.
+ * @param msg The format string for the message.
+ * @param ... The variable arguments for the format string.
+ */
+#define warn(msg, ...)                                                                         \
+  if (build_context)                                                                           \
     fprintf(stderr, "\033[33mwarn:\033[m %s: " msg "\n", build_context->name, ##__VA_ARGS__); \
-  else                                                                                        \
+  else                                                                                         \
     fprintf(stderr, "\033[31merr:\033[m " msg "\n", ##__VA_ARGS__)
 
-#define info(msg, ...)                                                                \
-  if (build_context)                                                                  \
+/**
+ * @brief Prints a formatted informational message to stdout, prefixed with the current build context name if available.
+ * @param msg The format string for the message.
+ * @param ... The variable arguments for the format string.
+ */
+#define info(msg, ...)                                                                     \
+  if (build_context)                                                                       \
     printf("\033[34minfo:\033[m %s: " msg "\n", build_context->name, ##__VA_ARGS__);  \
-  else                                                                                \
+  else                                                                                     \
     printf("\033[34minfo:\033[m " msg "\n", ##__VA_ARGS__)
 
-#define SyncGroup()                                                             \
-  for (pid_list_t *pid_list = pid_list_create(); pid_list != NULL;              \
+/**
+ * @brief Creates a scope for running asynchronous processes and waiting for them to complete.
+ * It creates a new process list, waits for all child processes in that list to finish,
+ * and then frees the list.
+ */
+#define SyncGroup()                                                               \
+  for (pid_list_t *pid_list = pid_list_create(); pid_list != NULL;                 \
     pid_list_wait_sync(pid_list), pid_list_free(pid_list), pid_list = NULL)
 
+/**
+ * @brief Creates a compound literal of type `build_context_t` on the stack.
+ * @param ... The initializers for the `build_context_t` struct.
+ * @note The BUILDER_CONTEXT_DATA type is defined in a separate header.
+ */
 #define BuildContextOf(...) (&(build_context_t){__VA_ARGS__})
 
-#define BuildContext(...)                                                                                 \
-  for (                                                                                                   \
+/**
+ * @brief Creates a build context scope. It pushes a new context, executes the code within its block,
+ * and then pops the context, restoring the previous one.
+ * @param ... The initializers for the new `build_context_t`.
+ */
+#define BuildContext(...)                                                                                    \
+  for (                                                                                                      \
     build_context_t *old = build_context_push(BuildContextOf(__VA_ARGS__)), *latch = (typeof(latch))0x01; \
-    latch != NULL && build_context_do_begin(old);                                                         \
-    latch = NULL, build_context_pop(old)                                                                  \
+    latch != NULL && build_context_do_begin(old);                                                          \
+    latch = NULL, build_context_pop(old)                                                                     \
   ) SyncGroup()
 
-#define $_sync(...)                                                            \
-    wait_pid_sync(                                                             \
+/**
+ * @brief Runs a command synchronously and waits for it to complete.
+ * @param ... A list of string arguments for the command, terminated by NULL.
+ * @note Relies on the StringArrayN macro, which is defined elsewhere.
+ */
+#define $_sync(...)                                                                   \
+    wait_pid_sync(                                                                    \
         run_command(StringArrayN(__VA_ARGS__)[0], StringArrayN(__VA_ARGS__)));
 
-#define $(...)                                                                  \
-    pid_list_add(pid_list, run_command(StringArrayN(__VA_ARGS__)[0],            \
-          StringArrayN(__VA_ARGS__)));
+/**
+ * @brief Runs a command asynchronously, adding its process ID to the current `SyncGroup`'s pid_list.
+ * @param ... A list of string arguments for the command, terminated by NULL.
+ * @note Relies on the StringArrayN macro, which is defined elsewhere.
+ */
+#define $(...)                                                                        \
+    pid_list_add(pid_list, run_command(StringArrayN(__VA_ARGS__)[0],                 \
+        StringArrayN(__VA_ARGS__)));
 
-#define main_impl (int argc, char **argv) {                                   \
-  static char *source_file = __FILE__;                                        \
-  if (is_file_older(argv[0], source_file)) {                                  \
-    char host_cc[PATH_MAX] = {0};                                             \
-    info("build script is newer than the current executable, "                \
-        "recompiling...");                                                    \
-                                                                              \
-    /* Find a C compiler to recompile the script*/                            \
-    find_executable("cc", host_cc);                                           \
-    *host_cc == 0 && find_executable("clang", host_cc);                       \
-    *host_cc == 0 && find_executable("gcc", host_cc);                         \
-                                                                              \
-    if (*host_cc == 0) {                                                      \
-      error("Failed to find host C compiler");                                \
-      return 1;                                                               \
-    }                                                                         \
-                                                                              \
-    int code = $_sync(host_cc, "-o", argv[0], (char *)source_file, NULL);     \
-                                                                              \
-    if (code != 0) {                                                          \
-      error("compilation failed with code %d", code);                         \
-                                                                              \
-      return 1;                                                               \
-    }                                                                         \
-                                                                              \
-    info("re-running build script again...");                                 \
-    info("--------------------------------");                                 \
-                                                                              \
-    /* Replace our process with the re-compiled build script */               \
-    execv(argv[0], argv);                                                     \
-  }                                                                           \
-  struct arguments_t *args = builder_parse_arguments(                         \
-    argc,                                                                     \
-    argv,                                                                     \
-    arguments,                                                                \
-    sizeof(arguments) / sizeof(arguments[0])                                  \
-  );                                                                          \
-  builder_entrypoint(args);                                                   \
-  builder_free_arguments(args);                                               \
+/**
+ * @brief Defines the main function body, adding logic to automatically recompile the
+ * build script if its source is newer than the executable.
+ * @note This macro is intended to be used as: `int main main_impl`.
+ * @note Relies on `builder_entrypoint` and the `arguments` global array, which are defined elsewhere.
+ */
+#define main_impl (int argc, char **argv) {                                         \
+  static char *source_file = __FILE__;                                              \
+  if (is_file_older(argv[0], source_file)) {                                        \
+    char host_cc[PATH_MAX] = {0};                                                   \
+    info("build script is newer than the current executable, "                      \
+        "recompiling...");                                                          \
+                                                                                    \
+    /* Find a C compiler to recompile the script*/                                  \
+    find_executable("cc", host_cc);                                                 \
+    *host_cc == 0 && find_executable("clang", host_cc);                             \
+    *host_cc == 0 && find_executable("gcc", host_cc);                               \
+                                                                                    \
+    if (*host_cc == 0) {                                                            \
+      error("Failed to find host C compiler");                                      \
+      return 1;                                                                     \
+    }                                                                               \
+                                                                                    \
+    int code = $_sync(host_cc, "-o", argv[0], (char *)source_file, NULL);            \
+                                                                                    \
+    if (code != 0) {                                                                \
+      error("compilation failed with code %d", code);                               \
+                                                                                    \
+      return 1;                                                                     \
+    }                                                                               \
+                                                                                    \
+    info("re-running build script again...");                                       \
+    info("--------------------------------");                                        \
+                                                                                    \
+    /* Replace our process with the re-compiled build script */                     \
+    execv(argv[0], argv);                                                           \
+  }                                                                                 \
+  struct arguments_t *args = builder_parse_arguments(                             \
+    argc,                                                                           \
+    argv,                                                                           \
+    arguments,                                                                      \
+    sizeof(arguments) / sizeof(arguments[0])                                        \
+  );                                                                                \
+  builder_entrypoint(args);                                                         \
+  builder_free_arguments(args);                                                     \
 }
 
 //////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////// Globals ///////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////
 
+/** @brief The name of the currently executing program. */
 impl(static char *program_name = NULL);
+/** @brief The current build mode (e.g., "debug", "release"). */
 impl(static char *build_mode = NULL);
 
 //////////////////////////////////////////////////////////////////////////////
 /////////////////////////////// Build context ////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////
 
+/**
+ * @brief Represents a named scope for build operations.
+ * @note The BUILDER_CONTEXT_DATA type is defined in a separate header.
+ */
 typedef struct build_context_t {
-  char *name, *mode;
+  /** @brief The name of the context (e.g., "Compiling library"). */
+  char *name,
+  /** @brief The mode this context applies to (e.g., "debug"). If NULL, applies to all modes. */
+       *mode;
+  /** @brief User-defined data associated with the context. */
   BUILDER_CONTEXT_DATA data;
 } build_context_t;
 
+/** @brief The currently active build context. */
 impl(static build_context_t *build_context);
 
+/**
+ * @brief Pushes a new build context onto the context stack.
+ * @param context The new context to make active.
+ * @return The previously active context, to be restored later.
+ */
 build_context_t *build_context_push(build_context_t *context) impl({
   build_context_t *old = build_context;
 
@@ -129,6 +201,11 @@ build_context_t *build_context_push(build_context_t *context) impl({
   return old;
 });
 
+/**
+ * @brief Checks if the current build context should be executed and prints an "entering" message.
+ * @param old The previous build context, used to revert if the current one is skipped.
+ * @return 1 if the context should proceed, 0 otherwise.
+ */
 int build_context_do_begin(build_context_t *old) impl({
   if (!build_context) {
     return 0;
@@ -145,6 +222,10 @@ int build_context_do_begin(build_context_t *old) impl({
   return 1;
 });
 
+/**
+ * @brief Pops the current build context, restoring the provided one.
+ * @param context The context to restore. Can be NULL if it was the top-level context.
+ */
 void build_context_pop(build_context_t *context) impl({
   if (context) {
     info("exiting \x1b[1m\x1b[34m%s\033[m... returning to \x1b[1m\x1b[34m%s\033[m",
@@ -161,9 +242,12 @@ void build_context_pop(build_context_t *context) impl({
 //////////////////////////////////////////////////////////////////////////////
 
 /**
- * Check if `source_file` is older than `target_file`
+ * @brief Check if `source_file` is older than `target_file`.
  *
  * If one of the files doesn't exist, this function will return false.
+ * @param source_file Path to the first file to compare.
+ * @param target_file Path to the second file to compare.
+ * @return `true` if `source_file` has an older modification time than `target_file`, `false` otherwise.
  */
 bool is_file_older(char *source_file, char *target_file) impl({
   time_t source_time, target_time;
@@ -184,6 +268,12 @@ bool is_file_older(char *source_file, char *target_file) impl({
   return source_time < target_time;
 });
 
+/**
+ * @brief Searches for an executable in the system's PATH environment variable.
+ * @param name The name of the executable to find.
+ * @param output_buffer A buffer of at least `PATH_MAX` size to store the full path if found.
+ * @return `true` if the executable was found, `false` otherwise.
+ */
 bool find_executable(const char *name, char output_buffer[PATH_MAX]) impl({
   char *path_env = getenv("PATH");
 
@@ -229,15 +319,28 @@ bool find_executable(const char *name, char output_buffer[PATH_MAX]) impl({
 ///////////////////////////////// Processes //////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////
 
-/// A process id list
+/** @brief A dynamic list to store process IDs (pid_t). */
 typedef struct pid_list_t {
-  size_t size, current;
+  /** @brief The allocated capacity of the list. */
+  size_t size,
+  /** @brief The current number of items in the list. */
+         current;
+  /** @brief The array of process IDs. */
   pid_t *items;
 } pid_list_t;
 
+/**
+ * @brief Creates and initializes a new, empty process ID list.
+ * @return A pointer to the newly allocated `pid_list_t`. Must be freed with `pid_list_free`.
+ */
 pid_list_t *pid_list_create()
   impl({ return (pid_list_t *)calloc(1, sizeof(pid_list_t)); });
 
+/**
+ * @brief Adds a process ID to the list, resizing if necessary.
+ * @param list The PID list to add to.
+ * @param pid The process ID to add. If -1, it is ignored.
+ */
 void pid_list_add(pid_list_t *list, pid_t pid) impl({
   if (pid == -1)
     return;
@@ -251,6 +354,10 @@ void pid_list_add(pid_list_t *list, pid_t pid) impl({
   list->items[list->current++] = pid;
 });
 
+/**
+ * @brief Frees the memory used by a process ID list.
+ * @param list The list to free.
+ */
 void pid_list_free(pid_list_t *list) impl({
   list->size = list->current = 0;
 
@@ -258,6 +365,11 @@ void pid_list_free(pid_list_t *list) impl({
   free(list);
 });
 
+/**
+ * @brief Waits for a single process to terminate and returns its exit code.
+ * @param pid The ID of the process to wait for.
+ * @return The exit status of the process, or the signal number if it was terminated by a signal.
+ */
 int wait_pid_sync(pid_t pid) impl({
   int status;
 
@@ -276,6 +388,11 @@ int wait_pid_sync(pid_t pid) impl({
   return -1;
 });
 
+/**
+ * @brief Waits for all processes in a PID list to terminate.
+ * @param pids The list of process IDs to wait for.
+ * @return A bitwise-OR combination of all process exit statuses.
+ */
 int pid_list_wait_sync(pid_list_t *pids) impl({
   int status = 0;
 
@@ -298,6 +415,12 @@ int pid_list_wait_sync(pid_list_t *pids) impl({
   return status;
 });
 
+/**
+ * @brief Creates a new child process to run a command.
+ * @param path The name or path of the executable to run.
+ * @param argv The argument vector (list of strings) for the new process, ending with NULL.
+ * @return The process ID of the child on success, or -1 on failure.
+ */
 pid_t run_command(const char *path, char **argv) impl({
   char executable_path[PATH_MAX];
 
@@ -333,6 +456,10 @@ pid_t run_command(const char *path, char **argv) impl({
 ////////////////////////////// Argument parser ///////////////////////////////
 //////////////////////////////////////////////////////////////////////////////
 
+/**
+ * @brief Gets the program name.
+ * @return The name of the program.
+ */
 char *builder_program_name() impl({
   return program_name;
 });
@@ -342,11 +469,19 @@ impl(
    * @brief A node for the linked list of parsed arguments.
    */
   typedef struct argument_node_t {
+    /** @brief The parsed argument data. */
     struct argument_t *argument;
+    /** @brief Pointer to the next node in the list. */
     struct argument_node_t *next;
   } argument_node_t;
 
-  // Finds a definition by its long name (e.g., "help").
+  /**
+   * @brief Finds an argument definition by its long name (e.g., "help").
+   * @param name The long name to search for.
+   * @param defs The array of argument definitions.
+   * @param defs_count The number of definitions in the array.
+   * @return A pointer to the matching definition, or NULL if not found.
+   */
   static const argument_definition_t* builder_find_def_by_long_name(const char *name, const argument_definition_t defs[], size_t defs_count) {
     for (size_t i = 0; i < defs_count; ++i) {
       if (defs[i].longName && strcmp(name, defs[i].longName) == 0) {
@@ -356,7 +491,13 @@ impl(
     return NULL;
   }
 
-  // Finds a definition by its short name (e.g., 'h').
+  /**
+   * @brief Finds an argument definition by its short name (e.g., 'h').
+   * @param name The short name character to search for.
+   * @param defs The array of argument definitions.
+   * @param defs_count The number of definitions in the array.
+   * @return A pointer to the matching definition, or NULL if not found.
+   */
   static const argument_definition_t* builder_find_def_by_short_name(char name, const argument_definition_t defs[], size_t defs_count) {
     for (size_t i = 0; i < defs_count; ++i) {
       if (defs[i].shortName != '\0' && defs[i].shortName == name) {
@@ -366,7 +507,13 @@ impl(
     return NULL;
   }
 
-  // Allocates and adds a new parsed argument to the linked list.
+  /**
+   * @brief Allocates and adds a new parsed argument to the linked list.
+   * @param args The main arguments structure containing the list.
+   * @param def The definition of the argument being added.
+   * @param value The string value for the argument, or NULL for toggles.
+   * @return `true` on success, `false` on memory allocation failure.
+   */
   static bool builder_add_argument(arguments_t *args, const argument_definition_t* def, char* value) {
     argument_t *new_arg = (typeof(new_arg)) malloc(sizeof(argument_t));
 
@@ -513,6 +660,7 @@ next_arg:;
 
 /**
  * @brief Frees all memory associated with an arguments_t struct.
+ * @param args The arguments structure to free.
  */
 void builder_free_arguments(arguments_t *args) impl({
   if (!args) return;
@@ -531,5 +679,4 @@ void builder_free_arguments(arguments_t *args) impl({
 
   free(args);
 });
-
 #endif /** __BUILDER_UNIX_H__ */
